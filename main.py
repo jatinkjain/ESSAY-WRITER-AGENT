@@ -1,8 +1,8 @@
 from langgraph.graph import StateGraph, START,END
 from langgraph.checkpoint.sqlite import SqliteSaver
-from langchain_core.messages import AnyMessage,HumanMessage,SystemMessage,AIMessage,ChatMessage
-from langchain_openai import ChatOpenAI
-from typing import TypedDict, Annotated,List
+from langchain_core.messages import HumanMessage,SystemMessage
+from langchain_groq import ChatGroq
+from typing import TypedDict, Annotated
 from pydantic import BaseModel
 from tavily import TavilyClient
 from dotenv import load_dotenv
@@ -28,7 +28,7 @@ class Queries(BaseModel):
 
 class essaywriter():
     def __init__(self):
-        self.model = ChatOpenAI(model="", temperature=0)
+        self.model = ChatGroq(model="qwen/qwen3.8-27b", temperature=0)
         self.PLAN_PROMPT = ("You are an expert writer tasked with writing a high level outline of a short 3 paragraph essay. "
                             "Write such an outline for the user provided topic. Give the three main headers of an outline of "
                              "the essay along with any relevant notes or instructions for the sections. ")
@@ -49,7 +49,7 @@ class essaywriter():
                                          "be used when making any requested revisions (as outlined below). "
                                          "Generate a list of search queries that will gather any relevant information. "
                                          "Only generate 2 queries max.")        
-        self.tavily = TavilyClient(api_key=[])
+        self.tavily = TavilyClient(api_key=os.environ["TAVILY_API_KEY"])
         graph = StateGraph(Agentstate)
         graph.add_node("planner",self.plan_node)
         graph.add_node("research_plan",self.research_plan_node)
@@ -80,12 +80,12 @@ class essaywriter():
         ]
         queries = self.model.with_structured_output(Queries).invoke(messages)
 
-        content = state["Content"] or []
+        content = state.get("Content",[])
         for q in queries.queries:
-            response = self.Tavily.search(query= q, max_results= 2)
+            response = self.tavily.search(query= q, max_results= 2)
             for r in response['results']:
                 content.append(r['content'])
-            return{"content": content, "lnode": "research_plan", "queries": queries.queries, "count": 1}
+        return{"Content": content, "lnode": "research_plan", "queries": queries.queries, "count": 1}
             
     def generation_node(self, state:Agentstate):
         content = "\n\n".join(state["Content"] or [])
@@ -109,15 +109,66 @@ class essaywriter():
             SystemMessage(content= self.RESEARCH_CRITIQUE_PROMPT),
             HumanMessage(content= state["critique"])
         ])
-        content = state["Content"] or []
+        content = state.get("Content",[])
         for q in queries.queries:
             response = self.tavily.search(query= q, max_results=2)
             for r in response['results']:
                 content.append(r['content'])
-        return{"content":content, "lnode":"research_critique", "count":1}        
+        return{"Content":content, "lnode":"research_critique", "count":1}        
 
     def should_continue(self,state:Agentstate):
         if state["revision_number"] > state["max_revisions"]:
             return END 
         return "reflect"
+
+
+MultiAgent = essaywriter()
+
+final_draft = None
+
+print("\n" + "=" * 60)
+print("              📝 AI ESSAY WRITER")
+print("=" * 60)
+
+task = input("\nEnter your essay topic:\n> ")
+
+print("\n" + "-" * 60)
+print("🤖 Starting AI Essay Writer...")
+print("-" * 60)
+
+thread = {"configurable":{"thread_id":"1"}}
+
+for s in MultiAgent.abot.stream(
+    {
+        "task": task,
+        "revision_number":1,
+        "max_revisions":2,
+        "count":0,
+        "Content":[]
+    },thread
+):
+    node_name = list(s.keys())[0]
+
+    messages = {
+    "planner": "🧠 Essay plan created",
+    "research_plan": "🔎 Topic research completed",
+    "generate": "✍️ Essay draft generated",
+    "reflect": "👨‍🏫 Essay reviewed",
+    "research_critique": "🔎 Revision research completed"
+}
+
+    print(f"✓ {messages.get(node_name, node_name)}")
+
+    if node_name=="generate":
+        final_draft= s["generate"]["draft"]
+
+print("\n" + "=" * 60)
+print("                    📝 FINAL ESSAY")
+print("=" * 60)
+
+print("\n" + final_draft)
+
+print("\n" + "=" * 60)
+print("                 ✅ ESSAY COMPLETE")
+print("=" * 60)
 
